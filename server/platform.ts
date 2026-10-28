@@ -408,13 +408,67 @@ function supabaseDriver(url: string, key: string): Driver {
 
 let driverInstance: Driver | null = null;
 
+// True when running on Netlify (or another hosted server) rather than on your own computer.
+function isHosted(): boolean {
+    return !!(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.SITE_ID || process.env.URL);
+}
+
+function serverSettings(): { url: string; key: string } {
+    const url = (process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
+    const key = (process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+    return { url, key };
+}
+
+const SETTINGS_MISSING = 'SERVER_SETTINGS_MISSING';
+
 function driver(): Driver {
     if (!driverInstance) {
-        const url = process.env.SUPABASE_URL;
-        const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-        driverInstance = url && key ? supabaseDriver(url, key) : localDriver();
+        const { url, key } = serverSettings();
+        if (url && key) {
+            driverInstance = supabaseDriver(url, key);
+        } else if (isHosted()) {
+            // Never fall back to test mode on the live site: say clearly what is missing instead.
+            throw new Error(SETTINGS_MISSING);
+        } else {
+            driverInstance = localDriver();
+        }
     }
     return driverInstance;
+}
+
+// Checks the connection to Supabase step by step. Shows only yes/no answers and error messages, never keys.
+export async function setupCheck(): Promise<Record<string, unknown>> {
+    const { url, key } = serverSettings();
+    const out: Record<string, unknown> = {
+        SUPABASE_URL: !url ? 'MISSING' : /^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(url) ? 'ok' : 'looks wrong (should be like https://abcd1234.supabase.co)',
+        SUPABASE_SECRET_KEY: !key
+            ? 'MISSING'
+            : key.startsWith('sb_publishable_')
+              ? 'WRONG KEY: this is the Publishable key, use the Secret key (sb_secret_...)'
+              : key.startsWith('sb_secret_') || key.startsWith('eyJ')
+                ? 'ok'
+                : 'looks wrong (should start with sb_secret_)',
+    };
+    if (!url || !key) {
+        out.result = 'Add the missing settings in Netlify (Site configuration > Environment variables), then Deploys > Trigger deploy.';
+        return out;
+    }
+    const sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+    const db1 = await sb.from('kv').select('id').limit(1);
+    out.database = db1.error ? 'ERROR: ' + db1.error.message : 'ok';
+    const rpc = await sb.rpc('kv_apply', { ops: [], atomic: false });
+    out.database_functions = rpc.error ? 'ERROR: ' + rpc.error.message : 'ok';
+    const files = await sb.rpc('file_list', { prefix: 'zz-check/', off: 0, lim: 1 });
+    out.file_list_function = files.error ? 'ERROR: ' + files.error.message : 'ok';
+    const bucket = await sb.storage.getBucket(BUCKET);
+    out.file_storage = bucket.error ? 'ERROR: ' + bucket.error.message : 'ok';
+    const problems = Object.values(out).filter((v) => typeof v === 'string' && v !== 'ok');
+    out.result = problems.length
+        ? db1.error || rpc.error || files.error || bucket.error
+            ? 'Run supabase/schema.sql again in Supabase > SQL Editor, and check that the Secret key and Project URL belong to the same project.'
+            : 'Fix the settings marked above in Netlify, then Deploys > Trigger deploy.'
+        : 'All good. The server is connected to Supabase.';
+    return out;
 }
 
 export const isLocal = () => !(process.env.SUPABASE_URL && (process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY));
@@ -767,6 +821,16 @@ const builtInRoutes: RouterRoutes = {
             return json({ ok: true });
         },
     ],
+    // Shows whether the server is connected to Supabase (yes/no answers only, never keys).
+    'GET /api/_setup-check': [
+        async () => {
+            try {
+                return json(await setupCheck());
+            } catch (e) {
+                return json({ result: 'ERROR: ' + (e instanceof Error ? e.message : String(e)) }, 500);
+            }
+        },
+    ],
     // Local testing only: serves stored files (the live site uses signed Supabase links instead).
     'GET /api/_local/file': [
         async (ctx) => {
@@ -820,6 +884,9 @@ export function router(routes: RouterRoutes) {
                 return error('No response', 500);
             } catch (e) {
                 console.error(e);
+                if (e instanceof Error && e.message === SETTINGS_MISSING) {
+                    return error('The server is not connected to its database yet. The site owner needs to finish the setup (open /api/_setup-check).', 503);
+                }
                 return error('Something went wrong on the server. Please try again.', 500);
             }
         }
