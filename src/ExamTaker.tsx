@@ -56,9 +56,11 @@ type Props = {
   onExpired: () => void;
 };
 
+const SAVE_EVERY_MS = 20000;
+
 const SAVE_LABEL: Record<SaveState, string> = {
   idle: 'Answers save automatically',
-  pending: 'Saving soon…',
+  pending: 'Kept on this phone, sending soon…',
   saving: 'Saving…',
   saved: 'All answers saved',
   error: 'No connection. Answers are kept on this phone and will be sent when you reconnect',
@@ -80,6 +82,10 @@ export default function ExamTaker({ session, examId, onExit, onExpired }: Props)
   const doneRef = useRef(false);
   const submittingRef = useRef(false);
   const saveTimer = useRef<number | undefined>(undefined);
+  const clearSaveTimer = () => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = undefined;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -128,7 +134,7 @@ export default function ExamTaker({ session, examId, onExit, onExpired }: Props)
         });
         if (r.data?.status === 'submitted') {
           doneRef.current = true;
-          window.clearTimeout(saveTimer.current);
+          clearSaveTimer();
           setDone({ auto: Boolean(r.data.autoSubmitted) || auto });
           clearLocalAnswers(examId, session.admissionNo);
         } else {
@@ -154,7 +160,7 @@ export default function ExamTaker({ session, examId, onExit, onExpired }: Props)
       submittingRef.current = true;
       setSubmitting(true);
       setSubmitErr('');
-      window.clearTimeout(saveTimer.current);
+      clearSaveTimer();
       let ok = await send(true, auto);
       let tries = 0;
       while (!ok && auto && tries < 5 && !doneRef.current) {
@@ -179,16 +185,35 @@ export default function ExamTaker({ session, examId, onExit, onExpired }: Props)
     [send],
   );
 
-  // Background save every 30 seconds if anything changed
+  // Safety net: try again every minute if a save failed or was missed.
   useEffect(() => {
     const t = window.setInterval(() => {
       if (dirtyRef.current && !doneRef.current && !submittingRef.current) send(false, false);
-    }, 30000);
+    }, 60000);
     return () => window.clearInterval(t);
   }, [send]);
 
+  // Save straight away when the student switches app or the connection comes back.
   useEffect(() => {
-    return () => window.clearTimeout(saveTimer.current);
+    const flush = () => {
+      if (dirtyRef.current && !doneRef.current && !submittingRef.current) {
+        clearSaveTimer();
+        send(false, false);
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', flush);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', flush);
+    };
+  }, [send]);
+
+  useEffect(() => {
+    return () => clearSaveTimer();
   }, []);
 
   const remaining = exam ? Date.parse(exam.endAt) - (now + offset) : 1;
@@ -206,10 +231,14 @@ export default function ExamTaker({ session, examId, onExit, onExpired }: Props)
     setAnswers(next);
     dirtyRef.current = true;
     setSaveState('pending');
-    window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      send(false, false);
-    }, 2500);
+    // Answers are kept on the phone at once, and sent to the server at most every 20 seconds.
+    // Fewer server requests keep the site within its hosting allowance during busy exams.
+    if (saveTimer.current === undefined) {
+      saveTimer.current = window.setTimeout(() => {
+        saveTimer.current = undefined;
+        if (dirtyRef.current && !doneRef.current && !submittingRef.current) send(false, false);
+      }, SAVE_EVERY_MS);
+    }
   }
 
   function confirmSubmit() {
@@ -222,7 +251,7 @@ export default function ExamTaker({ session, examId, onExit, onExpired }: Props)
   }
 
   async function saveAndLeave() {
-    window.clearTimeout(saveTimer.current);
+    clearSaveTimer();
     if (dirtyRef.current) await send(false, false);
     onExit();
   }
