@@ -478,7 +478,8 @@ export async function setupCheck(): Promise<Record<string, unknown>> {
     out.file_list_function = files.error ? 'ERROR: ' + files.error.message : 'ok';
     const bucket = await sb.storage.getBucket(BUCKET);
     out.file_storage = bucket.error ? 'ERROR: ' + bucket.error.message : 'ok';
-    const problems = Object.values(out).filter((v) => typeof v === 'string' && v !== 'ok');
+    const checked = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'database', 'database_functions', 'file_list_function', 'file_storage'];
+    const problems = checked.filter((k) => out[k] !== 'ok');
     out.result = problems.length
         ? db1.error || rpc.error || files.error || bucket.error
             ? 'Run supabase/schema.sql again in Supabase > SQL Editor, and check that the Secret key and Project URL belong to the same project.'
