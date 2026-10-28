@@ -309,6 +309,14 @@ export default function Portal() {
             </div>
           </Card>
         </div>
+        <footer className='mt-10 flex flex-wrap gap-4 text-xs text-slate-500'>
+          <a href='/privacy.html' className='hover:underline'>
+            Privacy policy
+          </a>
+          <a href='/terms.html' className='hover:underline'>
+            Terms of use
+          </a>
+        </footer>
       </main>
     </div>
   );
