@@ -453,6 +453,22 @@ export async function setupCheck(): Promise<Record<string, unknown>> {
         out.result = 'Add the missing settings in Netlify (Site configuration > Environment variables), then Deploys > Trigger deploy.';
         return out;
     }
+    // The project address is not secret (it is also in the website), so show it for comparing with Supabase.
+    out.address_used = url;
+    try {
+        const res = await fetch(url + '/rest/v1/', { headers: { apikey: key } });
+        out.can_reach_supabase = 'yes (status ' + res.status + ')';
+    } catch (e) {
+        const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+        const code = cause?.code || '';
+        out.can_reach_supabase =
+            'NO: ' +
+            (code === 'ENOTFOUND'
+                ? 'no Supabase project exists at this address. Copy the Project URL again from Supabase > Project Settings > Data API.'
+                : code || cause?.message || (e instanceof Error ? e.message : String(e)));
+        out.result = 'The server cannot reach Supabase. Compare address_used with the Project URL in Supabase, and check the project is not paused.';
+        return out;
+    }
     const sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
     const db1 = await sb.from('kv').select('id').limit(1);
     out.database = db1.error ? 'ERROR: ' + db1.error.message : 'ok';
