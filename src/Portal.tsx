@@ -178,7 +178,8 @@ export default function Portal() {
           </p>
         </div>
         <div className='grid gap-6 md:grid-cols-2'>
-          <Card>
+          {/* Shown second: teachers and principals come first on the page. */}
+          <Card className='order-2'>
             <div className='flex items-center gap-2'>
               <BookOpenCheck className='h-5 w-5 text-emerald-700' />
               <h2 className='text-lg font-bold text-slate-900'>{parentMode ? 'Parents' : 'Students'}</h2>
@@ -290,7 +291,7 @@ export default function Portal() {
               {parentMode ? 'I am a student' : 'I am a parent: view my child’s progress'}
             </button>
           </Card>
-          <Card className='flex flex-col'>
+          <Card className='order-1 flex flex-col'>
             <div className='flex items-center gap-2'>
               <ShieldCheck className='h-5 w-5 text-emerald-700' />
               <h2 className='text-lg font-bold text-slate-900'>Teachers & principals</h2>
