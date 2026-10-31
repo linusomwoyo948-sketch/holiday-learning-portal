@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+
+Sitemap: https://holiday-learning-portall.netlify.app/sitemap.xml
