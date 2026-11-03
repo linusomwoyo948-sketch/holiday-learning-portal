@@ -13,6 +13,7 @@ import {
 import { Alert, Btn, Card, inputCls, labelCls, TopBar } from './ui';
 import { useSiteName } from './site';
 import StaffSignIn from './StaffSignIn';
+import InstallCard from './InstallCard';
 
 const StudentHome = lazy(() => import('./StudentHome'));
 const StaffArea = lazy(() => import('./StaffArea'));
@@ -177,6 +178,7 @@ export default function Portal() {
             holidays.
           </p>
         </div>
+        <InstallCard />
         <div className='grid gap-6 md:grid-cols-2'>
           {/* Shown second: teachers and principals come first on the page. */}
           <Card className='order-2'>
