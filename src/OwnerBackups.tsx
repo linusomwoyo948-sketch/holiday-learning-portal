@@ -369,6 +369,30 @@ export function SecurityLog() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [clearing, setClearing] = useState(false);
+  const [showClear, setShowClear] = useState(false);
+
+  async function clearLog(olderThan30Days: boolean) {
+    const question = olderThan30Days
+      ? 'Delete security log entries older than 30 days? This cannot be undone.'
+      : 'Delete the whole security log? This cannot be undone.';
+    if (!window.confirm(question)) return;
+    setClearing(true);
+    setErr('');
+    setMsg('');
+    try {
+      const r = await api.post('/api/owner/audit/clear', { olderThan30Days });
+      const n = Number(r.data?.removed) || 0;
+      setMsg(`${n} entr${n === 1 ? 'y' : 'ies'} deleted. One line records that the log was cleared.`);
+      setShowClear(false);
+      await load();
+    } catch (e) {
+      setErr(errMsg(e, 'Could not clear the security log.'));
+    } finally {
+      setClearing(false);
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -394,17 +418,44 @@ export function SecurityLog() {
           <History className='h-5 w-5 text-emerald-700' />
           <h2 className='text-lg font-bold text-slate-900'>Security log</h2>
         </div>
-        <Btn variant='ghost' onClick={load} disabled={loading}>
-          <RefreshCw className='h-4 w-4' />
-          Refresh
-        </Btn>
+        <div className='flex flex-wrap gap-2'>
+          <Btn variant='ghost' onClick={load} disabled={loading || clearing}>
+            <RefreshCw className='h-4 w-4' />
+            Refresh
+          </Btn>
+          {events.length > 0 && (
+            <Btn variant='secondary' onClick={() => setShowClear((v) => !v)} disabled={clearing}>
+              <Trash2 className='h-4 w-4' />
+              Clear log
+            </Btn>
+          )}
+        </div>
       </div>
       <p className='mt-1 text-sm text-slate-600'>
-        Important actions on the site: schools approved or paused, backups, restores and website name changes.
+        Important actions on the site: schools approved, paused or deleted, backups, restores and website name changes.
       </p>
+      {showClear && (
+        <div className='mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3'>
+          <span className='text-sm text-red-800'>What would you like to delete?</span>
+          <Btn variant='secondary' disabled={clearing} onClick={() => clearLog(true)}>
+            Entries older than 30 days
+          </Btn>
+          <Btn variant='danger' disabled={clearing} onClick={() => clearLog(false)}>
+            {clearing ? 'Deleting…' : 'Everything'}
+          </Btn>
+          <Btn variant='ghost' disabled={clearing} onClick={() => setShowClear(false)}>
+            Cancel
+          </Btn>
+        </div>
+      )}
       {err && (
         <div className='mt-3'>
           <Alert>{err}</Alert>
+        </div>
+      )}
+      {msg && (
+        <div className='mt-3'>
+          <Alert kind='success'>{msg}</Alert>
         </div>
       )}
       {loading && events.length === 0 ? (

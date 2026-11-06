@@ -1517,6 +1517,35 @@ async function restoreStep(by: string): Promise<{ done: number; total: number; f
   return { done, total: job.total, finished };
 }
 
+async function listAllRows(table: string): Promise<Array<Rec & { id: string }>> {
+  const out: Array<Rec & { id: string }> = [];
+  let nextToken: string | undefined;
+  for (let i = 0; i < 100; i++) {
+    const page = await db.list<Rec>(table, { limit: 1000, nextToken });
+    out.push(...page.items);
+    if (!page.nextToken) break;
+    nextToken = page.nextToken;
+  }
+  return out;
+}
+
+// Removes the system's own housekeeping records once they are no longer needed:
+// daily change lists already folded into backups, and hourly sign-in attempt counters.
+async function cleanupHousekeeping(): Promise<void> {
+  const day = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  for (let back = 40; back <= 47; back++) {
+    const table = `chg_${dayKey(new Date(now - back * day))}`;
+    const ids = (await listAllRows(table)).map(r => r.id);
+    for (let i = 0; i < ids.length; i += 400) await db.tx.delete(table, ids.slice(i, i + 400));
+  }
+  for (let back = 26; back <= 96; back++) {
+    const table = `rl_${new Date(now - back * 60 * 60 * 1000).toISOString().slice(0, 13).split('-').join('').split('T').join('')}`;
+    const ids = (await listAllRows(table)).map(r => r.id);
+    for (let i = 0; i < ids.length; i += 400) await db.tx.delete(table, ids.slice(i, i + 400));
+  }
+}
+
 // ===================== deleting a whole school =====================
 
 type SchoolDeleteJob = {
@@ -2014,14 +2043,36 @@ const routes: RouterRoutes = {
       const events: Array<Rec & { id: string }> = [];
       for (const m of months) {
         try {
-          const page = await db.list<Rec>(`audit_${m}`, { limit: 200 });
-          events.push(...page.items);
+          events.push(...(await listAllRows(`audit_${m}`)));
         } catch (e) {
           if (isQuotaError(e)) throw e;
         }
       }
       events.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
       return json({ events: events.slice(0, 100) });
+    },
+  ],
+
+  // Clears the security log: everything, or only entries older than 30 days.
+  'POST /api/owner/audit/clear': [
+    requireAuth(),
+    requireOwner,
+    async ctx => {
+      const olderOnly = bodyOf(ctx).olderThan30Days === true;
+      const cutoff = olderOnly ? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() : '9999';
+      let removed = 0;
+      const now = new Date();
+      for (let back = 0; back < 36; back++) {
+        const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
+        const table = `audit_${d.toISOString().slice(0, 7).split('-').join('')}`;
+        const rows = await listAllRows(table);
+        const ids = rows.filter(r => String(r.at || '') < cutoff).map(r => r.id);
+        for (let i = 0; i < ids.length; i += 400) await db.tx.delete(table, ids.slice(i, i + 400));
+        removed += ids.length;
+      }
+      // A single line records that the log was cleared, and by whom.
+      await audit(ctx.user?.email || '', 'Security log cleared', olderOnly ? `${removed} entries older than 30 days` : `${removed} entries`);
+      return json({ removed });
     },
   ],
 
@@ -4437,6 +4488,11 @@ export const nightlyBackup = async () => {
     await cleanupStaleUploads();
   } catch (e) {
     console.error('upload clean-up failed', e);
+  }
+  try {
+    await cleanupHousekeeping();
+  } catch (e) {
+    console.error('housekeeping clean-up failed', e);
   }
   return { statusCode: 200 };
 };
