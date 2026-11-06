@@ -51,7 +51,14 @@ const EXT_TYPES: Record<string, string> = {
   heif: 'image/heif',
 };
 
-const INTERNAL_SETTINGS = new Set(['backup-meta', 'restore-job', 'migration-v2', 'migration-v2-lock', 'file-copy-job']);
+const INTERNAL_SETTINGS = new Set([
+  'backup-meta',
+  'restore-job',
+  'migration-v2',
+  'migration-v2-lock',
+  'file-copy-job',
+  'school-delete-job',
+]);
 const CANONICAL_TABLES = [
   'schools',
   'school_names',
@@ -1510,6 +1517,156 @@ async function restoreStep(by: string): Promise<{ done: number; total: number; f
   return { done, total: job.total, finished };
 }
 
+// ===================== deleting a whole school =====================
+
+type SchoolDeleteJob = {
+  schoolId: string;
+  schoolName: string;
+  principalUserId: string;
+  streamIds: string[];
+  teacherIds: string[];
+  removed: number;
+  by: string;
+  startedAt: string;
+  finishedAt: string;
+};
+
+const SCHOOL_DELETE_JOB = 'school-delete-job';
+
+// Works through one list at a time, 200 entries per round, until it is empty or time runs out.
+// Returns false if time ran out, so the next step carries on where this one stopped.
+async function drainList(
+  table: string,
+  deadline: number,
+  handle: (ids: string[]) => Promise<number>,
+  job: SchoolDeleteJob
+): Promise<boolean> {
+  for (;;) {
+    if (Date.now() > deadline) return false;
+    const page = await db.list<Rec>(table, { limit: 200 });
+    const ids = page.items.map(i => i.id);
+    if (!ids.length) return true;
+    job.removed += await handle(ids);
+    await wDelete(table, ids);
+  }
+}
+
+function belongsTo(rec: Rec | null, schoolId: string): boolean {
+  return !!rec && schoolIdOf(rec as { schoolId?: string }) === schoolId;
+}
+
+async function deleteRecordsWithFiles(table: string, ids: string[], schoolId: string): Promise<number> {
+  const recs = await db.get<Rec>(table, ids);
+  const mine: string[] = [];
+  const files: string[] = [];
+  recs.forEach((r, i) => {
+    if (!belongsTo(r, schoolId)) return;
+    mine.push(ids[i]);
+    const a = (r as { attachment?: Attachment | null }).attachment;
+    if (a && a.path) files.push(a.path);
+  });
+  if (files.length) await deleteFiles(files);
+  if (mine.length) await wDelete(table, mine);
+  return mine.length;
+}
+
+async function deleteExamsOf(ids: string[], job: SchoolDeleteJob, deadline: number): Promise<number> {
+  let n = 0;
+  for (const id of ids) {
+    await drainList(P.examSubs(id), deadline + 15000, async subIds => {
+      await wDelete('exam_submissions', subIds);
+      return subIds.length;
+    }, job);
+    n += await deleteRecordsWithFiles('exams', [id], job.schoolId);
+  }
+  return n;
+}
+
+async function deleteAssignmentsOf(ids: string[], job: SchoolDeleteJob, deadline: number): Promise<number> {
+  let n = 0;
+  const recs = await db.get<AssignmentRec>('assignments', ids);
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    const a = recs[i];
+    await drainList(P.assignmentSubs(id), deadline + 15000, async subIds => {
+      return deleteRecordsWithFilesAnySchool('assignment_submissions', subIds);
+    }, job);
+    if (a) {
+      // Parent checks are stored per learner, so remove one for every learner in the assignment's classes.
+      for (const streamId of a.streamIds || []) {
+        const students = await listIds(P.streamStudents(streamId));
+        const keys = students.map(st => assignmentSubKey(id, st));
+        for (let k = 0; k < keys.length; k += 400) await wDelete('parent_checks', keys.slice(k, k + 400));
+      }
+    }
+    await wDelete('parent_check_counts', [id]);
+    n += await deleteRecordsWithFiles('assignments', [id], job.schoolId);
+  }
+  return n;
+}
+
+// Submissions carry no school id of their own; they are removed with their assignment.
+async function deleteRecordsWithFilesAnySchool(table: string, ids: string[]): Promise<number> {
+  const recs = await db.get<Rec>(table, ids);
+  const files: string[] = [];
+  const found: string[] = [];
+  recs.forEach((r, i) => {
+    if (!r) return;
+    found.push(ids[i]);
+    const a = (r as { attachment?: Attachment | null }).attachment;
+    if (a && a.path) files.push(a.path);
+  });
+  if (files.length) await deleteFiles(files);
+  if (found.length) await wDelete(table, found);
+  return found.length;
+}
+
+async function deleteStudentsOf(ids: string[], job: SchoolDeleteJob, deadline: number): Promise<number> {
+  for (const id of ids) {
+    await drainList(P.studentQuestions(id), deadline + 15000, qIds => deleteRecordsWithFiles('questions', qIds, job.schoolId), job);
+  }
+  return deleteRecordsWithFiles('students', ids, job.schoolId);
+}
+
+// One round of deleting a school. Every part can safely run again, so an interrupted
+// deletion simply continues. Returns true when everything has been removed.
+async function deleteSchoolStep(job: SchoolDeleteJob): Promise<boolean> {
+  const deadline = Date.now() + 30000;
+  const S = job.schoolId;
+  for (const streamId of job.streamIds) {
+    if (!(await drainList(P.streamExams(streamId), deadline, ids => deleteExamsOf(ids, job, deadline), job))) return false;
+    if (!(await drainList(P.streamAssignments(streamId), deadline, ids => deleteAssignmentsOf(ids, job, deadline), job))) return false;
+    if (!(await drainList(P.streamMaterials(streamId), deadline, ids => deleteRecordsWithFiles('materials', ids, S), job))) return false;
+    if (!(await drainList(P.streamAnnouncements(streamId), deadline, ids => deleteRecordsWithFiles('announcements', ids, S), job))) return false;
+    if (!(await drainList(P.streamStudents(streamId), deadline, ids => deleteStudentsOf(ids, job, deadline), job))) return false;
+  }
+  for (const teacherId of job.teacherIds) {
+    if (!(await drainList(P.teacherExams(teacherId), deadline, ids => deleteExamsOf(ids, job, deadline), job))) return false;
+    if (!(await drainList(P.teacherAssignments(teacherId), deadline, ids => deleteAssignmentsOf(ids, job, deadline), job))) return false;
+    if (!(await drainList(P.teacherMaterials(teacherId), deadline, ids => deleteRecordsWithFiles('materials', ids, S), job))) return false;
+    if (!(await drainList(P.authorAnnouncements(teacherId), deadline, ids => deleteRecordsWithFiles('announcements', ids, S), job))) return false;
+    if (!(await drainList(P.teacherQuestions(teacherId), deadline, ids => deleteRecordsWithFiles('questions', ids, S), job))) return false;
+    if (!(await drainList(P.teacherBank(teacherId), deadline, async ids => {
+      await wDelete('qbank', ids);
+      return ids.length;
+    }, job))) return false;
+    const [t] = await db.get<TeacherRec>('teachers', [teacherId]);
+    if (t && schoolIdOf(t) === S) {
+      await wDelete('teachers', [teacherId]);
+      job.removed += 1;
+    }
+  }
+  if (job.principalUserId) {
+    if (!(await drainList(P.authorAnnouncements(job.principalUserId), deadline, ids => deleteRecordsWithFiles('announcements', ids, S), job))) return false;
+  }
+  if (!(await drainList(P.schoolTeachers(S), deadline, async () => 0, job))) return false;
+  await wDelete('catalog', [catalogId(S)]);
+  await wDelete('stats', [S]);
+  await wDelete('schools', [S]);
+  dropSchool(S);
+  return true;
+}
+
 type FileCopyJob = {
   total: number;
   next: number;
@@ -1769,6 +1926,83 @@ const routes: RouterRoutes = {
     },
   ],
 
+  // Deletes a paused school and everything in it: classes, teachers, students, work, marks and files.
+  'POST /api/owner/schools/:id/delete/start': [
+    requireAuth(),
+    requireOwner,
+    async ctx => {
+      const school = await getSchool(ctx.params.id, true);
+      if (!school) return error('School not found.', 404);
+      if (school.status !== 'suspended') {
+        return error('Pause the school first, then delete it. Pausing stops everyone using it while it is removed.', 400);
+      }
+      const typed = str(bodyOf(ctx).confirm, 200).trim().toLowerCase();
+      if (typed !== school.name.trim().toLowerCase()) {
+        return error('Type the school name exactly as shown to confirm.', 400);
+      }
+      const [running] = await db.get<SchoolDeleteJob>('settings', [SCHOOL_DELETE_JOB], { consistent: true });
+      if (running && !running.finishedAt && running.schoolId !== school.id) {
+        return error(`${running.schoolName} is still being deleted. Finish that first.`, 400);
+      }
+      if (!running || running.finishedAt || running.schoolId !== school.id) {
+        // Keep a copy first, so a school deleted by mistake can be restored from Backups.
+        try {
+          await runBackup('safety');
+        } catch (e) {
+          console.error('backup before school deletion failed', e);
+          return error('Could not save a safety backup first, so nothing was deleted. Please try again.', 500);
+        }
+        const job: SchoolDeleteJob = {
+          schoolId: school.id,
+          schoolName: school.name,
+          principalUserId: school.principalUserId || '',
+          streamIds: (await getStreams(school.id)).map(st => st.id),
+          teacherIds: await listIds(P.schoolTeachers(school.id)),
+          removed: 0,
+          by: ctx.user?.email || '',
+          startedAt: nowIso(),
+          finishedAt: '',
+        };
+        await db.tx.update('settings', [{ id: SCHOOL_DELETE_JOB, record: job }]);
+        // Free the school name and the principal's email straight away.
+        await releaseName(school.nameKey, school.id);
+        const ek = emailKey(school.principalEmail);
+        const [idx] = await db.get<IndexRec>('principal_index', [ek], { consistent: true });
+        if (idx && idx.schoolId === school.id) await wDelete('principal_index', [ek]);
+        await audit(job.by, 'School deletion started', school.name);
+      }
+      return json({ ok: true });
+    },
+  ],
+
+  'POST /api/owner/schools/delete/step': [
+    requireAuth(),
+    requireOwner,
+    async () => {
+      const [job] = await db.get<SchoolDeleteJob>('settings', [SCHOOL_DELETE_JOB], { consistent: true });
+      if (!job || job.finishedAt) return json({ finished: true, removed: job ? job.removed : 0, schoolName: job ? job.schoolName : '' });
+      const finished = await deleteSchoolStep(job);
+      const next: SchoolDeleteJob = { ...job, finishedAt: finished ? nowIso() : '' };
+      await db.tx.update('settings', [{ id: SCHOOL_DELETE_JOB, record: next }]);
+      if (finished) {
+        cache.clear();
+        await audit(job.by, 'School deleted', `${job.schoolName} (${job.removed} records)`);
+      }
+      return json({ finished, removed: next.removed, schoolName: next.schoolName });
+    },
+  ],
+
+  'GET /api/owner/schools/delete/status': [
+    requireAuth(),
+    requireOwner,
+    async () => {
+      const [job] = await db.get<SchoolDeleteJob>('settings', [SCHOOL_DELETE_JOB], { consistent: true });
+      return json({
+        job: job && !job.finishedAt ? { schoolId: job.schoolId, schoolName: job.schoolName, removed: job.removed } : null,
+      });
+    },
+  ],
+
   'GET /api/owner/audit': [
     requireAuth(),
     requireOwner,
@@ -1814,6 +2048,44 @@ const routes: RouterRoutes = {
       const info = await runBackup('manual');
       await audit(ctx.user?.email || '', 'Backup made', `${info.records} records`);
       return json({ backup: info });
+    },
+  ],
+
+  // Deletes chosen backups, or all but the newest, to free storage.
+  'POST /api/owner/backups/delete': [
+    requireAuth(),
+    requireOwner,
+    async ctx => {
+      const [job] = await db.get<RestoreJob>('settings', ['restore-job'], { consistent: true });
+      if (job && !job.finishedAt) return error('Finish the restore in progress before deleting backups.', 400);
+      const meta = await getMeta();
+      if (!meta || !meta.snapshots.length) return json({ deleted: 0 });
+      const b = bodyOf(ctx);
+      let remove: string[];
+      if (b.keepNewest === true) {
+        const newest = meta.snapshots[meta.snapshots.length - 1].path;
+        remove = meta.snapshots.map(sn => sn.path).filter(path => path !== newest);
+      } else {
+        const wanted = new Set((Array.isArray(b.paths) ? b.paths : []).map(x => str(x, 300)));
+        remove = meta.snapshots.map(sn => sn.path).filter(path => wanted.has(path));
+      }
+      if (!remove.length) return json({ deleted: 0 });
+      const gone = new Set(remove);
+      const next: BackupMeta = {
+        // If the base for the nightly backup is deleted, the next backup makes a fresh full copy.
+        latest: gone.has(meta.latest) ? '' : meta.latest,
+        lastProcessedDay: meta.lastProcessedDay,
+        snapshots: meta.snapshots.filter(sn => !gone.has(sn.path)),
+      };
+      await db.tx.update('settings', [{ id: 'backup-meta', record: next }]);
+      try {
+        await deleteFiles(remove);
+      } catch (e) {
+        console.error('deleting backup files failed', e);
+      }
+      snapshotCache.clear();
+      await audit(ctx.user?.email || '', 'Backups deleted', `${remove.length} backup${remove.length === 1 ? '' : 's'}`);
+      return json({ deleted: remove.length });
     },
   ],
 

@@ -171,6 +171,11 @@ npm run local
 
 Then open http://localhost:5173. Test mode signs you in with any email address straight away and keeps data in `local-data.json` and files in `local-files/`, never touching the live site. With the test server running, `node local/smoke-test.mjs` runs an automatic check of the main features.
 
+## Removing a school and tidying backups
+
+- **Delete a school** that no longer uses the portal: on the owner page, click **Pause school**, then **Delete school** and type the school's name. This removes the principal, teachers, classes, students, materials, assignments, exams, marks and uploaded files of that school only. A safety backup is saved first, and the school name and principal's email become free to register again.
+- **Delete backups**: on the owner page under Backups, use the bin button next to a backup, or **Clear old backups** to keep only the newest. After a restore, the page offers this too. Download any backup you want to keep before deleting it.
+
 ## Good to know
 
 - Free Supabase projects pause after a week with no visits. If that happens, open the Supabase dashboard and click **Restore**. Regular use keeps the project awake.

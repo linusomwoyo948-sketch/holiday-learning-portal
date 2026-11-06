@@ -120,6 +120,8 @@ export default function Owner() {
   const [err, setErr] = useState('');
   const [notice, setNotice] = useState('');
   const [busyId, setBusyId] = useState('');
+  const [deleting, setDeleting] = useState<{ schoolName: string; removed: number } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ schoolId: string; schoolName: string; removed: number } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -136,7 +138,64 @@ export default function Owner() {
 
   useEffect(() => {
     load();
+    api
+      .get('/api/owner/schools/delete/status')
+      .then((r) => setPendingDelete(r.data?.job || null))
+      .catch(() => undefined);
   }, [load]);
+
+  // Deletes in rounds until the server says everything is gone.
+  async function runDeleteSteps(schoolName: string) {
+    setDeleting({ schoolName, removed: 0 });
+    let failures = 0;
+    for (;;) {
+      try {
+        const r = await api.post('/api/owner/schools/delete/step', {});
+        failures = 0;
+        setDeleting({ schoolName, removed: Number(r.data?.removed) || 0 });
+        if (r.data?.finished) {
+          setNotice(`${schoolName} and all its data have been deleted (${Number(r.data?.removed) || 0} records). A safety backup taken just before is in Backups if you ever need it.`);
+          break;
+        }
+      } catch (e) {
+        failures += 1;
+        if (failures >= 3) {
+          setErr(errMsg(e, 'Deleting stopped before it finished. Click Continue deleting to carry on.'));
+          break;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
+      }
+    }
+    setDeleting(null);
+    setPendingDelete(null);
+    await load();
+    api
+      .get('/api/owner/schools/delete/status')
+      .then((r) => setPendingDelete(r.data?.job || null))
+      .catch(() => undefined);
+  }
+
+  async function deleteSchool(s: SchoolRow) {
+    const typed = window.prompt(
+      `Permanently delete ${s.name}?\n\nThis removes the principal, teachers, classes, students, materials, assignments, exams, marks and files of this school. A safety backup is saved first.\n\nType the school name to confirm:`,
+    );
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== s.name.trim().toLowerCase()) {
+      setErr('The name you typed did not match, so nothing was deleted.');
+      return;
+    }
+    setBusyId(s.id);
+    setErr('');
+    setNotice('');
+    try {
+      await api.post(`/api/owner/schools/${s.id}/delete/start`, { confirm: typed });
+      await runDeleteSteps(s.name);
+    } catch (e) {
+      setErr(errMsg(e, 'Could not delete the school.'));
+    } finally {
+      setBusyId('');
+    }
+  }
 
   async function setStatus(s: SchoolRow, status: SchoolStatus, label: string) {
     if (status === 'suspended' && !window.confirm(`Pause ${s.name}? Its principal, teachers and students will not be able to use the portal until you reactivate it.`)) {
@@ -182,7 +241,10 @@ export default function Owner() {
       <div className='flex flex-wrap items-center justify-between gap-3'>
         <div>
           <h1 className='text-xl font-bold text-slate-900'>Schools on the portal</h1>
-          <p className='text-sm text-slate-600'>Approve new schools and pause or reactivate existing ones.</p>
+          <p className='text-sm text-slate-600'>
+            Approve new schools and pause or reactivate existing ones. To remove a school that no longer uses the
+            portal, pause it first, then click Delete school.
+          </p>
         </div>
         <Btn variant='ghost' onClick={load} disabled={loading}>
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
@@ -209,6 +271,19 @@ export default function Owner() {
 
       {err && <Alert>{err}</Alert>}
       {notice && <Alert kind='success'>{notice}</Alert>}
+      {deleting && (
+        <Alert kind='info'>
+          Deleting {deleting.schoolName}… {deleting.removed} records removed so far. Please keep this page open.
+        </Alert>
+      )}
+      {!deleting && pendingDelete && (
+        <Alert kind='info'>
+          Deleting {pendingDelete.schoolName} has not finished.{' '}
+          <button type='button' className='font-semibold underline' onClick={() => runDeleteSteps(pendingDelete.schoolName)}>
+            Continue deleting
+          </button>
+        </Alert>
+      )}
 
       {loading && schools.length === 0 ? (
         <Spinner />
@@ -284,6 +359,12 @@ export default function Owner() {
                             <Btn disabled={busy} onClick={() => setStatus(s, 'approved', 'reactivated')}>
                               <PlayCircle className='h-4 w-4' />
                               Reactivate
+                            </Btn>
+                          )}
+                          {s.status === 'suspended' && (
+                            <Btn variant='danger' disabled={busy || !!deleting} onClick={() => deleteSchool(s)}>
+                              <Trash2 className='h-4 w-4' />
+                              Delete school
                             </Btn>
                           )}
                           {(s.status === 'pending' || s.status === 'rejected') && (

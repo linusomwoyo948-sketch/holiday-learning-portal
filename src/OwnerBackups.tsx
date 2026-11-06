@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
-import { DatabaseBackup, Download, History, RefreshCw, RotateCcw, Upload } from 'lucide-react';
+import { DatabaseBackup, Download, History, RefreshCw, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { api, errMsg, fmtDateTime, fmtSize } from './lib';
 import { Alert, Btn, Card, inputCls, Spinner } from './ui';
 
@@ -47,7 +47,8 @@ export default function OwnerBackups() {
   const [backups, setBackups] = useState<Backup[]>([]);
   const [pending, setPending] = useState<RestoreState>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<'' | 'backup' | 'upload' | 'restore'>('');
+  const [busy, setBusy] = useState<'' | 'backup' | 'upload' | 'restore' | 'delete'>('');
+  const [justRestored, setJustRestored] = useState(false);
   const [err, setErr] = useState('');
   const [msg, setMsg] = useState('');
   const [confirmPath, setConfirmPath] = useState('');
@@ -120,6 +121,7 @@ export default function OwnerBackups() {
       setConfirmPath('');
       setConfirmText('');
       setMsg('Restore finished. The data from the chosen backup is back in place.');
+      setJustRestored(true);
       await load();
     } catch (e) {
       setErr(errMsg(e, 'The restore stopped before it finished. Click Continue restore to carry on.'));
@@ -136,6 +138,7 @@ export default function OwnerBackups() {
     try {
       await runSteps();
       setMsg('Restore finished. The data from the chosen backup is back in place.');
+      setJustRestored(true);
       await load();
     } catch (e) {
       setErr(errMsg(e, 'The restore stopped before it finished. Click Continue restore to carry on.'));
@@ -171,6 +174,30 @@ export default function OwnerBackups() {
     }
   }
 
+  async function deleteBackups(body: { paths?: string[]; keepNewest?: boolean }, question: string) {
+    if (!window.confirm(question)) return;
+    setBusy('delete');
+    setErr('');
+    setMsg('');
+    try {
+      const r = await api.post('/api/owner/backups/delete', body);
+      const n = Number(r.data?.deleted) || 0;
+      setMsg(n ? `${n} backup${n === 1 ? '' : 's'} deleted.` : 'No backups were deleted.');
+      setJustRestored(false);
+      await load();
+    } catch (e) {
+      setErr(errMsg(e, 'Could not delete the backups.'));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const clearOld = () =>
+    deleteBackups(
+      { keepNewest: true },
+      `Delete all backups except the newest one (${Math.max(0, backups.length - 1)} backups)? Download any you want to keep first. This cannot be undone.`,
+    );
+
   const percent = progress && progress.total ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0;
 
   return (
@@ -194,6 +221,12 @@ export default function OwnerBackups() {
             <RefreshCw className='h-4 w-4' />
             Refresh
           </Btn>
+          {backups.length > 1 && (
+            <Btn variant='secondary' onClick={clearOld} disabled={!!busy}>
+              <Trash2 className='h-4 w-4' />
+              {busy === 'delete' ? 'Deleting…' : 'Clear old backups'}
+            </Btn>
+          )}
           <Btn onClick={backupNow} disabled={!!busy}>
             <DatabaseBackup className='h-4 w-4' />
             {busy === 'backup' ? 'Backing up…' : 'Back up now'}
@@ -214,6 +247,14 @@ export default function OwnerBackups() {
         {uploadInfo && <Alert kind='info'>{uploadInfo}</Alert>}
         {err && <Alert>{err}</Alert>}
         {msg && <Alert kind='success'>{msg}</Alert>}
+        {justRestored && backups.length > 1 && (
+          <Alert kind='info'>
+            Now that the restore is done, you can free space by deleting the older backups.{' '}
+            <button type='button' className='font-semibold underline' onClick={clearOld}>
+              Delete all except the newest
+            </button>
+          </Alert>
+        )}
         {pending && busy !== 'restore' && (
           <Alert kind='info'>
             A restore was started but has not finished ({pending.done} of {pending.total} records).{' '}
@@ -273,6 +314,20 @@ export default function OwnerBackups() {
                   >
                     <RotateCcw className='h-4 w-4' />
                     Restore
+                  </Btn>
+                  <Btn
+                    variant='ghost'
+                    disabled={!!busy}
+                    aria-label='Delete this backup'
+                    title='Delete this backup'
+                    onClick={() =>
+                      deleteBackups(
+                        { paths: [b.path] },
+                        `Delete the backup from ${fmtDateTime(b.createdAt)}? Download it first if you may need it. This cannot be undone.`,
+                      )
+                    }
+                  >
+                    <Trash2 className='h-4 w-4' />
                   </Btn>
                 </div>
               </div>
