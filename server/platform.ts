@@ -105,7 +105,7 @@ export type Driver = {
     getFile(path: string): Promise<Buffer | null>;
     deleteFiles(paths: string[]): Promise<void>;
     listFiles(prefix: string, offset: number, limit: number): Promise<{ files: FileInfo[]; more: boolean }>;
-    fileUrls(paths: string[]): Promise<{ path: string; url: string }[]>;
+    fileUrls(paths: string[], download?: boolean): Promise<{ path: string; url: string }[]>;
     uploadUrl(path: string): Promise<string | null>;
     moveFile(from: string, to: string): Promise<boolean>;
 };
@@ -265,8 +265,8 @@ function localDriver(): Driver {
                 more: offset + limit < hits.length,
             };
         },
-        async fileUrls(paths) {
-            return paths.map((p) => ({ path: p, url: '/api/_local/file?path=' + encodeURIComponent(p) }));
+        async fileUrls(paths, download) {
+            return paths.map((p) => ({ path: p, url: '/api/_local/file?path=' + encodeURIComponent(p) + (download ? '&download=1' : '') }));
         },
         async uploadUrl() {
             return null;
@@ -376,11 +376,11 @@ function supabaseDriver(url: string, key: string): Driver {
             }));
             return { files: rows.slice(0, limit), more: rows.length > limit };
         },
-        async fileUrls(paths) {
+        async fileUrls(paths, download) {
             if (!paths.length) {
                 return [];
             }
-            const { data, error } = await bucket().createSignedUrls(paths, 6 * 60 * 60);
+            const { data, error } = await bucket().createSignedUrls(paths, 6 * 60 * 60, download ? { download: true } : undefined);
             if (error) {
                 throw new Error(error.message);
             }
@@ -614,8 +614,9 @@ export const storage = {
             })
         );
     },
-    async url(paths: string[]): Promise<{ path: string; url: string }[]> {
-        return driver().fileUrls(paths);
+    // With download set, opening the link saves the file instead of showing it in the browser.
+    async url(paths: string[], options?: { download?: boolean }): Promise<{ path: string; url: string }[]> {
+        return driver().fileUrls(paths, !!options?.download);
     },
     async delete(paths: string[]): Promise<void> {
         if (paths.length) {
@@ -859,7 +860,11 @@ const builtInRoutes: RouterRoutes = {
             if (!b) {
                 return error('Not found', 404);
             }
-            return { statusCode: 200, headers: { 'content-type': 'application/octet-stream' }, body: b.toString('base64'), isBase64Encoded: true };
+            const headers: Record<string, string> = { 'content-type': 'application/octet-stream' };
+            if (ctx.query.download) {
+                headers['content-disposition'] = 'attachment; filename="' + (path.split('/').pop() || 'file') + '"';
+            }
+            return { statusCode: 200, headers, body: b.toString('base64'), isBase64Encoded: true };
         },
     ],
 };

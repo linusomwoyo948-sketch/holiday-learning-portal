@@ -2031,7 +2031,7 @@ const routes: RouterRoutes = {
     async () => {
       const meta = await getMeta();
       const snaps = meta ? meta.snapshots : [];
-      const urls = snaps.length ? await storage.url(snaps.map(s => s.path)) : [];
+      const urls = snaps.length ? await storage.url(snaps.map(s => s.path), { download: true }) : [];
       const urlMap = new Map(urls.map(u => [u.path, u.url]));
       const [job] = await db.get<RestoreJob>('settings', ['restore-job'], { consistent: true });
       return json({
